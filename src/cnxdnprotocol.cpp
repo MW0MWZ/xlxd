@@ -22,6 +22,7 @@
 // ----------------------------------------------------------------------------
 
 #include "main.h"
+#include "cconfig.h"
 #include <string.h>
 #include "cnxdnprotocol.h"
 #include "cnxdnutils.h"
@@ -222,9 +223,10 @@ void CNxdnProtocol::RxTask(void)
                         uint8 *ambes[4] = { ambe0, ambe1, ambe2, ambe3 };
                         CNxdnUtils::DecodeVoice(uiPayload, ambes);
 
-                        // Adjust gain for NXDN→DMR direction
+                        // Adjust gain for all audio arriving over NXDN
+                        float gain = g_Config.GetNxdnToDmrGain() / 10.0f;
                         for (int j = 0; j < 4; j++) {
-                            CYsfUtils::AdjustAmbeGain(ambes[j], GAIN_NXDN_TO_DMR / 10.0f);
+                            CYsfUtils::AdjustAmbeGain(ambes[j], gain);
                         }
 
                         // Get the module to find the frame counter
@@ -790,9 +792,10 @@ void CNxdnProtocol::HandleQueue(void)
             // When we have 4 frames, encode and send NXDN packet
             if ( m_StreamsCache[iModId].m_uiFrameCount >= 4 )
             {
-                // Adjust gain for DMR→NXDN direction
+                // Adjust gain for all audio sent out over NXDN
+                float gain = g_Config.GetDmrToNxdnGain() / 10.0f;
                 for (unsigned int j = 0; j < 4; j++) {
-                    CYsfUtils::AdjustAmbeGain(m_StreamsCache[iModId].m_ambeFrames[j], GAIN_DMR_TO_NXDN / 10.0f);
+                    CYsfUtils::AdjustAmbeGain(m_StreamsCache[iModId].m_ambeFrames[j], gain);
                 }
 
                 // Encode 4 AMBE frames into NXDN payload

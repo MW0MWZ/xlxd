@@ -99,6 +99,7 @@ protected:
 
     // socket
     CIp             m_Ip;
+    uint16          m_uiPort;           // AMBEd port, TRANSCODER_PORT
     CUdpSocket      m_Socket;
     std::atomic<bool> m_bConnected;
 

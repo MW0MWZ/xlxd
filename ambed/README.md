@@ -219,6 +219,9 @@ The callsign shown is the reflector's, as AMBEd isn't told who is talking.
 
 ### How to tune
 
+For a step-by-step guide covering AMBEd and XLXd's gains together, see the
+[Audio Tuning Guide](../AUDIO-TUNING.md). In short:
+
 1. Look at several stations on each mode, not just your own radio.
 2. Set each `<MODE>_TO_PCM` so typical stations on that mode average near 0 dB
    of AGC gain.

@@ -23,6 +23,7 @@
 // ----------------------------------------------------------------------------
 
 #include "main.h"
+#include "cconfig.h"
 #include <cstring>
 #include "creflector.h"
 #include "ctranscoder.h"
@@ -57,6 +58,7 @@ CTranscoder::CTranscoder()
     m_bWaitingForStream = false;
     m_StreamidOpenStream = 0;
     m_PortOpenStream = 0;
+    m_uiPort = TRANSCODER_PORT;
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////
@@ -79,9 +81,10 @@ bool CTranscoder::Init(void)
 
     // create server's IP
     m_Ip = g_Reflector.GetTranscoderIp();
+    m_uiPort = g_Config.GetPort("TRANSCODER_PORT");
     
     // create our socket
-    ok = m_Socket.Open(TRANSCODER_PORT);
+    ok = m_Socket.Open(m_uiPort);
     if ( ok )
     {
         // start  thread;
@@ -89,7 +92,7 @@ bool CTranscoder::Init(void)
     }
     else
     {
-        std::cout << "Error opening socket on port UDP" << TRANSCODER_PORT << " on ip " << g_Reflector.GetListenIp() << std::endl;
+        std::cout << "Error opening socket on port UDP" << m_uiPort << " on ip " << g_Reflector.GetListenIp() << std::endl;
     }
 
     // done
@@ -164,7 +167,7 @@ void CTranscoder::Task(void)
                 // Close the orphaned AMBEd channel to prevent hardware exhaustion.
                 CBuffer closeBuf;
                 EncodeClosestreamPacket(&closeBuf, StreamId);
-                m_Socket.Send(closeBuf, m_Ip, TRANSCODER_PORT);
+                m_Socket.Send(closeBuf, m_Ip, m_uiPort);
                 std::cout << "ambed late response for stream " << (int)StreamId
                           << " on port " << (int)Port
                           << " — sent close to free hardware channel" << std::endl;
@@ -254,7 +257,7 @@ CCodecStream *CTranscoder::GetStream(CPacketStream *PacketStream, uint8 uiCodecI
             m_bWaitingForStream = true;
             EncodeOpenstreamPacket(&Buffer, uiCodecIn, uiCodecOut1, uiCodecOut2, uiCodecOut3);
             m_SemaphoreOpenStream.PreWaitFor();
-            m_Socket.Send(Buffer, m_Ip, TRANSCODER_PORT);
+            m_Socket.Send(Buffer, m_Ip, m_uiPort);
 
             // wait for AMBEd response (holding mutex blocks other GetStream callers)
             bool gotResponse = m_SemaphoreOpenStream.WaitFor(AMBED_OPENSTREAM_TIMEOUT);
@@ -285,7 +288,7 @@ CCodecStream *CTranscoder::GetStream(CPacketStream *PacketStream, uint8 uiCodecI
                 else
                 {
                     EncodeClosestreamPacket(&Buffer, stream->GetStreamId());
-                    m_Socket.Send(Buffer, m_Ip, TRANSCODER_PORT);
+                    m_Socket.Send(Buffer, m_Ip, m_uiPort);
                     delete stream;
                     stream = NULL;
                 }
@@ -322,7 +325,7 @@ void CTranscoder::ReleaseStream(CCodecStream *stream)
                 {
                     // send close packet
                     EncodeClosestreamPacket(&Buffer, m_Streams[i]->GetStreamId());
-                    m_Socket.Send(Buffer, m_Ip, TRANSCODER_PORT);
+                    m_Socket.Send(Buffer, m_Ip, m_uiPort);
                     
                     // and close it. Close() sets m_bStopThread on the
                     // codec stream and joins its Task thread. After
@@ -414,7 +417,7 @@ void CTranscoder::HandleKeepalives(void)
     
     // send keepalive
     EncodeKeepAlivePacket(&keepalive);
-    m_Socket.Send(keepalive, m_Ip, TRANSCODER_PORT);
+    m_Socket.Send(keepalive, m_Ip, m_uiPort);
     
     // check if still with us
     if ( m_bConnected && (m_LastActivityTime.DurationSinceNow() >= TRANSCODER_KEEPALIVE_TIMEOUT) )
