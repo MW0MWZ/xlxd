@@ -36,6 +36,25 @@
 #include "cnxdniddirhttp.h"
 
 ////////////////////////////////////////////////////////////////////////////////////////
+// peer lookup helper
+//
+// Talk groups and ports are looked up by the peer's interlink name (NXnnnnn),
+// so peers that share an IP address each keep their own values.
+
+template <typename T>
+static const T *FindPeerValue(const std::vector<std::pair<CCallsign, T>> &list, const CCallsign &callsign)
+{
+    for ( const auto &entry : list )
+    {
+        if ( entry.first.HasSameCallsign(callsign) )
+        {
+            return &entry.second;
+        }
+    }
+    return NULL;
+}
+
+////////////////////////////////////////////////////////////////////////////////////////
 // constructor
 
 CNxdnProtocol::CNxdnProtocol()
@@ -522,8 +541,8 @@ void CNxdnProtocol::HandleQueue(void)
     if ( packets.empty() )
         return;
 
-    // build peer ID lookup map once per drain cycle (stable across all packets)
-    std::map<uint32_t, uint16_t> peerIdByAddr;
+    // build peer talk group list once per drain cycle (stable across all packets)
+    std::vector<std::pair<CCallsign, uint16_t>> peerIdByName;
     {
         CPeers *peers = g_Reflector.GetPeers();
         int peerIdx = -1;
@@ -533,7 +552,7 @@ void CNxdnProtocol::HandleQueue(void)
             // FindNextPeer(PROTOCOL_NXDN) guarantees this is a CNxdnPeer
             CNxdnPeer *nxdnPeer = static_cast<CNxdnPeer *>(peer);
             {
-                peerIdByAddr[nxdnPeer->GetIp().GetAddr()] = nxdnPeer->GetNxdnId();
+                peerIdByName.push_back(std::make_pair(nxdnPeer->GetCallsign(), nxdnPeer->GetNxdnId()));
             }
         }
         g_Reflector.ReleasePeers();
@@ -613,7 +632,7 @@ void CNxdnProtocol::HandleQueue(void)
             // Create header data packet with proper VCALL FACCH1 payload
             uint8_t payload[NXDN_VOICE_PAYLOAD_SIZE];
 
-            // Send header to peers using pre-built peerIdByAddr map
+            // Send header to peers using pre-built peerIdByName list
             CClients *clients = g_Reflector.GetClients();
             int index = -1;
             CClient *client = NULL;
@@ -633,10 +652,10 @@ void CNxdnProtocol::HandleQueue(void)
                         continue;
                     }
 
-                    auto it = peerIdByAddr.find(client->GetIp().GetAddr());
-                    if ( it != peerIdByAddr.end() )
+                    const uint16_t *peerId = FindPeerValue(peerIdByName, client->GetCallsign());
+                    if ( peerId != NULL )
                     {
-                        uint16_t dstId = it->second;
+                        uint16_t dstId = *peerId;
 
                         // capture first dstId for SACCH encoding (written to cache after loop)
                         if ( !firstDstStored )
@@ -700,7 +719,7 @@ void CNxdnProtocol::HandleQueue(void)
                     srcIdCopy, dstIdCopy,
                     m_StreamsCache[iModId].m_uiPacketCount++);
 
-                // Send using pre-built peerIdByAddr map
+                // Send using pre-built peerIdByName list
                 CClients *clients = g_Reflector.GetClients();
                 int index = -1;
                 CClient *client = NULL;
@@ -717,10 +736,10 @@ void CNxdnProtocol::HandleQueue(void)
                             continue;
                         }
 
-                        auto it = peerIdByAddr.find(client->GetIp().GetAddr());
-                        if ( it != peerIdByAddr.end() )
+                        const uint16_t *peerId = FindPeerValue(peerIdByName, client->GetCallsign());
+                        if ( peerId != NULL )
                         {
-                            uint16_t dstId = it->second;
+                            uint16_t dstId = *peerId;
 
                             uint8_t flags = NXDN_FLAG_GROUP;
                             EncodeDataPacket(&buffer, srcIdCopy, dstId, flags, payload);
@@ -733,7 +752,7 @@ void CNxdnProtocol::HandleQueue(void)
                 m_StreamsCache[iModId].m_uiFrameCount = 0;
             }
 
-            // Create trailer packet using pre-built peerIdByAddr map
+            // Create trailer packet using pre-built peerIdByName list
             uint8_t payload[NXDN_VOICE_PAYLOAD_SIZE];
             CClients *clients = g_Reflector.GetClients();
             int index = -1;
@@ -751,10 +770,10 @@ void CNxdnProtocol::HandleQueue(void)
                         continue;
                     }
 
-                    auto it = peerIdByAddr.find(client->GetIp().GetAddr());
-                    if ( it != peerIdByAddr.end() )
+                    const uint16_t *peerId = FindPeerValue(peerIdByName, client->GetCallsign());
+                    if ( peerId != NULL )
                     {
-                        uint16_t dstId = it->second;
+                        uint16_t dstId = *peerId;
 
                         // Encode TX_REL payload with proper LICH, SACCH, and
                         // FACCH1-encoded Layer3 TX_REL message (per-peer dstId)
@@ -811,7 +830,7 @@ void CNxdnProtocol::HandleQueue(void)
                     m_StreamsCache[iModId].m_uiPacketCount++);
 
                 // Send to all NXDN peers on this module.
-                // Send using pre-built peerIdByAddr map
+                // Send using pre-built peerIdByName list
                 CClients *clients = g_Reflector.GetClients();
                 int index = -1;
                 CClient *client = NULL;
@@ -829,10 +848,10 @@ void CNxdnProtocol::HandleQueue(void)
                             continue;
                         }
 
-                        auto it = peerIdByAddr.find(client->GetIp().GetAddr());
-                        if ( it != peerIdByAddr.end() )
+                        const uint16_t *peerId = FindPeerValue(peerIdByName, client->GetCallsign());
+                        if ( peerId != NULL )
                         {
-                            uint16_t dstId = it->second;
+                            uint16_t dstId = *peerId;
 
                             uint8_t flags = NXDN_FLAG_GROUP;
                             EncodeDataPacket(&buffer, srcIdCopy, dstId, flags, payload);
@@ -950,8 +969,8 @@ void CNxdnProtocol::HandlePeerKeepalives(void)
 {
     CBuffer buffer;
 
-    // snapshot callsign→port from GK list, release GK before acquiring Peers
-    std::map<uint32_t, uint16_t> peerPortByAddr;
+    // snapshot interlink name→port from GK list, release GK before acquiring Peers
+    std::vector<std::pair<CCallsign, uint16_t>> peerPortByName;
     {
         CPeerCallsignList *list = g_GateKeeper.GetPeerList();
         for ( int i = 0; i < list->size(); i++ )
@@ -960,7 +979,7 @@ void CNxdnProtocol::HandlePeerKeepalives(void)
             if ( IsNxdnPeerCallsign(item->GetCallsign()) && item->GetPort() != 0 )
             {
                 item->ResolveIp();
-                peerPortByAddr[item->GetIp().GetAddr()] = item->GetPort();
+                peerPortByName.push_back(std::make_pair(item->GetCallsign(), item->GetPort()));
             }
         }
         g_GateKeeper.ReleasePeerList();
@@ -987,13 +1006,13 @@ void CNxdnProtocol::HandlePeerKeepalives(void)
         }
         else
         {
-            // find the port for this peer from pre-built map
-            auto it = peerPortByAddr.find(peer->GetIp().GetAddr());
-            if ( it != peerPortByAddr.end() )
+            // find the port for this peer from pre-built list
+            const uint16_t *port = FindPeerValue(peerPortByName, peer->GetCallsign());
+            if ( port != NULL )
             {
                 // send keepalive poll
                 EncodePollPacket(&buffer, g_Reflector.GetCallsign(), nxdnPeer->GetNxdnId());
-                m_Socket.Send(buffer, peer->GetIp(), it->second);
+                m_Socket.Send(buffer, peer->GetIp(), *port);
             }
         }
     }
