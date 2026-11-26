@@ -116,6 +116,7 @@ static_assert(DSCP_VALUE >= 0 && DSCP_VALUE <= 63,
 #define DPLUS_PEER_KEEPALIVE_TIMEOUT    (DPLUS_PEER_KEEPALIVE_PERIOD*6)     // in seconds
 #define DPLUS_PEER_RECONNECT_PERIOD     5                                   // in seconds
 #define DPLUS_PEER_CONNECT_TIMEOUT      10                                  // in seconds (for handshake)
+#define DPLUS_PEER_LOGIN_CALLSIGN       "N0CALL"                            // D+ registered callsign (change)
 
 // DCS - timing matched to ircDDBGateway (5s poll, 60s timeout)
 #define DCS_PORT                        30051                               // UDP port

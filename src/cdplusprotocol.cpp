@@ -33,6 +33,39 @@
 // periodic cleanup interval for stale reject trackers
 #define CLEANUP_CHECK_INTERVAL  5.0     // seconds between cleanup sweeps
 
+// callsign presented to remote REF reflectors for outbound peer links
+static CCallsign GetDplusPeerLoginCallsign(const CCallsign &fallback)
+{
+    const char *cs = DPLUS_PEER_LOGIN_CALLSIGN;
+    if ( cs != NULL && cs[0] != '\0' )
+    {
+        return CCallsign(cs);
+    }
+    return fallback;
+}
+
+// true the first time a peer stream id is seen (used to log once per transmission).
+// Remembers the most recent ids so interleaved transmissions do not re-log each other.
+// Only called from the RX thread.
+static bool IsNewPeerStreamForLog(uint16 streamId)
+{
+    static uint16 recent[16] = { 0 };
+    static bool   used[16]   = { false };
+    static int    next       = 0;
+
+    for ( int i = 0; i < 16; i++ )
+    {
+        if ( used[i] && recent[i] == streamId )
+        {
+            return false;
+        }
+    }
+    recent[next] = streamId;
+    used[next] = true;
+    next = (next + 1) % 16;
+    return true;
+}
+
 ////////////////////////////////////////////////////////////////////////////////////////
 // operation
 
@@ -97,16 +130,55 @@ void CDplusProtocol::RxTask(void)
             {
                 // Skip gatekeeper for peer connections (we initiated these)
                 bool isPeer = false;
+                char peerRemoteModule = '\0';
                 {
                     CPeers *peers = g_Reflector.GetPeers();
-                    isPeer = (peers->FindPeer(Ip, PROTOCOL_DPLUS) != NULL);
+                    CPeer *p = peers->FindPeer(Ip, PROTOCOL_DPLUS);
+                    isPeer = (p != NULL);
+                    if ( p != NULL )
+                    {
+                        CDplusPeer *dp = dynamic_cast<CDplusPeer *>(p);
+                        if ( dp != NULL )
+                        {
+                            peerRemoteModule = dp->GetRemoteModule();
+                        }
+                    }
                     g_Reflector.ReleasePeers();
+                }
+
+                // Only accept traffic from the remote module we are linked to.
+                // Frames for a stream whose header was dropped are discarded
+                // because no stream is ever opened for them.
+                if ( isPeer && peerRemoteModule != '\0' )
+                {
+                    // RPT2 carries reflector+module (e.g. "REF020 A"); RPT1 is the
+                    // originating station + band letter, so it must not be used here.
+                    bool wanted = (Header->GetRpt2Module() == peerRemoteModule);
+
+                    // log once per transmission (headers are repeated during a stream)
+                    if ( IsNewPeerStreamForLog(Header->GetStreamId()) )
+                    {
+                        std::cout << "DPlus peer header: rpt1 module '" << Header->GetRpt1Module()
+                                  << "' rpt2 module '" << Header->GetRpt2Module()
+                                  << "' (linked remote '" << peerRemoteModule << "') "
+                                  << (wanted ? "accepted" : "dropped") << std::endl;
+                    }
+
+                    if ( !wanted )
+                    {
+                        delete Header;
+                        Header = NULL;
+                    }
                 }
 
                 // Peer traffic bypasses MayTransmit by design, but is
                 // still subject to the per-callsign loop block — see
                 // cysfprotocol.cpp for the rationale.
-                if ( isPeer )
+                if ( Header == NULL )
+                {
+                    // dropped: not the linked remote module
+                }
+                else if ( isPeer )
                 {
                     if ( g_GateKeeper.IsCallsignLoopBlocked(
                             Header->GetMyCallsign(), "DPlus peer") )
@@ -150,7 +222,7 @@ void CDplusProtocol::RxTask(void)
                     // This is the connect echo - send login packet with local and remote modules
                     std::cout << "DPlus connect echo from peer " << dplusPeer->GetCallsign() << std::endl;
                     CBuffer loginBuffer;
-                    EncodeLoginPacket(&loginBuffer, GetReflectorCallsign(),
+                    EncodeLoginPacket(&loginBuffer, GetDplusPeerLoginCallsign(GetReflectorCallsign()),
                                       dplusPeer->GetLocalModule(), dplusPeer->GetRemoteModule());
                     m_Socket.Send(loginBuffer, Ip, dplusPeer->GetPort());
                     dplusPeer->SetConnectionState(DPLUS_PEER_STATE_LOGGING_IN);
@@ -1137,11 +1209,11 @@ void CDplusProtocol::SendPeerLinkAnnouncement(CDplusPeer *peer)
     // RPT1 = our callsign with local module
     // RPT2 = remote reflector with remote module
     // MY = our callsign
-    CCallsign rpt1 = GetReflectorCallsign();
+    CCallsign rpt1 = GetDplusPeerLoginCallsign(GetReflectorCallsign());
     rpt1.SetModule(peer->GetLocalModule());
     CCallsign rpt2 = peer->GetCallsign();
     rpt2.SetModule(peer->GetRemoteModule());
-    CCallsign my = GetReflectorCallsign();
+    CCallsign my = GetDplusPeerLoginCallsign(GetReflectorCallsign());
     my.SetModule(peer->GetLocalModule());
 
     CDvHeaderPacket header(my, CCallsign("CQCQCQ"), rpt1, rpt2, streamId, 0);
@@ -1223,13 +1295,16 @@ void CDplusProtocol::EncodeConnectPacket(CBuffer *Buffer)
 
 void CDplusProtocol::EncodeLoginPacket(CBuffer *Buffer, const CCallsign &Callsign, char localModule, char remoteModule)
 {
-    // Login packet: 0x1C,0xC0,0x04,0x00 + callsign (8 bytes) + remote module + padding (15 bytes)
-    // Format: [4-byte header][8-byte callsign with local module in byte 7][remote module][15 bytes padding]
-    // - Local module goes in callsign position 7 (byte 11 of packet)
-    // - Remote/target module goes at byte 12
+    // Login packet (28 bytes):
+    // [0-3]   0x1C,0xC0,0x04,0x00
+    // [4-11]  callsign (8 bytes, local module/band in byte 11)
+    // [12]    remote module
+    // [13-19] zero padding
+    // [20-27] client ID "DV019999" (what DPlus gateways send)
     uint8 tag[] = { 0x1C,0xC0,0x04,0x00 };
     uint8 callsign[8];
-    uint8 padding[15];
+    uint8 padding[7];
+    static const char clientId[] = "DV019999";     // 8 chars, no terminator sent
 
     // Get callsign as 8 bytes, space-padded
     Callsign.GetCallsign(callsign);
@@ -1240,14 +1315,13 @@ void CDplusProtocol::EncodeLoginPacket(CBuffer *Buffer, const CCallsign &Callsig
         callsign[7] = (uint8)localModule;
     }
 
-    // Zero the padding
     ::memset(padding, 0, sizeof(padding));
 
     Buffer->Set(tag, sizeof(tag));
     Buffer->Append(callsign, sizeof(callsign));
-    // Append remote/target module at byte 12
     Buffer->Append((uint8)remoteModule);
     Buffer->Append(padding, sizeof(padding));
+    Buffer->Append((uint8 *)clientId, sizeof(clientId) - 1);
 }
 
 void CDplusProtocol::EncodeLinkPacket(CBuffer *Buffer, char module)
