@@ -44,6 +44,15 @@ static CCallsign GetDplusPeerLoginCallsign(const CCallsign &fallback)
     return fallback;
 }
 
+// RPT1 presented to a REF peer: our login callsign + the local module (band),
+// identical to what we logged in with. Falls back to the reflector callsign.
+static void SetPeerRpt1Impl(CDvHeaderPacket *header, const CCallsign &fallback, char localModule)
+{
+    CCallsign rpt1 = GetDplusPeerLoginCallsign(fallback);
+    rpt1.SetModule(localModule);
+    header->SetRpt1Callsign(rpt1);
+}
+
 // true the first time a peer stream id is seen (used to log once per transmission).
 // Remembers the most recent ids so interleaved transmissions do not re-log each other.
 // Only called from the RX thread.
@@ -945,6 +954,9 @@ void CDplusProtocol::HandleQueue(void)
 
                 CDvHeaderPacket peerHeader((const CDvHeaderPacket &)*packet);
                 peerHeader.SetRpt2Module(dplusPeer->GetRemoteModule());
+                // REF reflectors only accept a dongle whose RPT1 is its own registered
+                // callsign + band, so replace the originating RPT1 (e.g. DCS020 G)
+                SetPeerRpt1Impl(&peerHeader, GetReflectorCallsign(), dplusPeer->GetLocalModule());
                 CBuffer peerBuffer;
                 if ( EncodeDvPacket(peerHeader, &peerBuffer) )
                 {
@@ -993,6 +1005,7 @@ void CDplusProtocol::HandleQueue(void)
                     {
                         CDvHeaderPacket packet2(cachedHeader);
                         packet2.SetRpt2Module(dplusPeer->GetRemoteModule());
+                        SetPeerRpt1Impl(&packet2, GetReflectorCallsign(), dplusPeer->GetLocalModule());
                         CBuffer headerBuffer;
                         if ( EncodeDvPacket(packet2, &headerBuffer) )
                         {
