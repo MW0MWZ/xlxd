@@ -110,6 +110,7 @@ public:
     // set callsigns — any mutation invalidates the CRC, so each setter
     // re-runs ComputeCrc() to keep m_uiCrc fresh. Cost is a 39-byte CCITT-16
     // (microseconds); called at most ~3 times per transmission.
+    void SetRpt1Callsign(const CCallsign &cs)       { m_csRPT1 = cs; ComputeCrc(); }
     void SetRpt2Callsign(const CCallsign &cs)       { m_csRPT2 = cs; ComputeCrc(); }
     void SetRpt2Module(char c)                      { m_csRPT2.SetModule(c); ComputeCrc(); }
     void SetMySuffix(const char *sz)                { m_csMY.SetSuffix(sz); ComputeCrc(); }
