@@ -53,26 +53,66 @@ static void SetPeerRpt1Impl(CDvHeaderPacket *header, const CCallsign &fallback, 
     header->SetRpt1Callsign(rpt1);
 }
 
-// true the first time a peer stream id is seen (used to log once per transmission).
-// Remembers the most recent ids so interleaved transmissions do not re-log each other.
-// Only called from the RX thread.
-static bool IsNewPeerStreamForLog(uint16 streamId)
+// Transmission-end report sent by a REF reflector to its linked peer when a stream
+// finishes: 0A C0 0B <flag> <streamId LE16> <frames LE16> <2 more bytes>
+// (as observed: matches the reflector's "tx end ... streamid x:y cnt n" log line).
+// Informational only, no reply is needed as far as observed. Returns true when the
+// packet is one of these and comes from one of our DPlus peers. Called from the RX thread.
+static bool IsPeerTxEndReport(const CBuffer &Buffer, const CIp &Ip, CCallsign *PeerCallsign)
 {
-    static uint16 recent[16] = { 0 };
-    static bool   used[16]   = { false };
-    static int    next       = 0;
+    if ( Buffer.size() != 10 ||
+         Buffer.data()[0] != 0x0A || Buffer.data()[1] != 0xC0 || Buffer.data()[2] != 0x0B )
+    {
+        return false;
+    }
+    CPeers *peers = g_Reflector.GetPeers();
+    CPeer *peer = peers->FindPeer(Ip, PROTOCOL_DPLUS);
+    bool isPeer = (peer != NULL);
+    if ( isPeer )
+    {
+        *PeerCallsign = peer->GetCallsign();
+    }
+    g_Reflector.ReleasePeers();
+    return isPeer;
+}
 
+// Remembers the most recent peer stream ids and whether each was accepted or
+// dropped by the module filter. Used to log once per transmission and to tell, when
+// the REF later reports the end of that stream, whether it was one we dropped.
+// Remembers the last 16 ids so interleaved transmissions do not re-log each other.
+// Only called from the RX thread.
+enum { PEER_STREAM_UNKNOWN = 0, PEER_STREAM_ACCEPTED = 1, PEER_STREAM_DROPPED = 2 };
+
+static int  g_PeerStreamId[16]    = { 0 };
+static int  g_PeerStreamState[16] = { 0 };   // PEER_STREAM_*
+static int  g_PeerStreamNext      = 0;
+
+// returns true the first time this stream id is seen (and records its state)
+static bool NotePeerStream(uint16 streamId, bool wanted)
+{
     for ( int i = 0; i < 16; i++ )
     {
-        if ( used[i] && recent[i] == streamId )
+        if ( g_PeerStreamState[i] != PEER_STREAM_UNKNOWN && g_PeerStreamId[i] == (int)streamId )
         {
             return false;
         }
     }
-    recent[next] = streamId;
-    used[next] = true;
-    next = (next + 1) % 16;
+    g_PeerStreamId[g_PeerStreamNext] = (int)streamId;
+    g_PeerStreamState[g_PeerStreamNext] = wanted ? PEER_STREAM_ACCEPTED : PEER_STREAM_DROPPED;
+    g_PeerStreamNext = (g_PeerStreamNext + 1) % 16;
     return true;
+}
+
+static int GetPeerStreamState(uint16 streamId)
+{
+    for ( int i = 0; i < 16; i++ )
+    {
+        if ( g_PeerStreamState[i] != PEER_STREAM_UNKNOWN && g_PeerStreamId[i] == (int)streamId )
+        {
+            return g_PeerStreamState[i];
+        }
+    }
+    return PEER_STREAM_UNKNOWN;
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////
@@ -165,9 +205,12 @@ void CDplusProtocol::RxTask(void)
                     bool wanted = (Header->GetRpt2Module() == peerRemoteModule);
 
                     // log once per transmission (headers are repeated during a stream)
-                    if ( IsNewPeerStreamForLog(Header->GetStreamId()) )
+                    if ( NotePeerStream(Header->GetStreamId(), wanted) )
                     {
-                        std::cout << "DPlus peer header: rpt1 module '" << Header->GetRpt1Module()
+                        std::cout << "DPlus peer header: streamid " << std::hex << std::setfill('0')
+                                  << std::setw(4) << Header->GetStreamId()
+                                  << std::dec << std::setfill(' ')
+                                  << " rpt1 module '" << Header->GetRpt1Module()
                                   << "' rpt2 module '" << Header->GetRpt2Module()
                                   << "' (linked remote '" << peerRemoteModule << "') "
                                   << (wanted ? "accepted" : "dropped") << std::endl;
@@ -427,6 +470,25 @@ void CDplusProtocol::RxTask(void)
                 }
             }
             g_Reflector.ReleaseClients();
+        }
+        else if ( IsPeerTxEndReport(Buffer, Ip, &Callsign) )
+        {
+            // transmission-end report from a REF peer: log it, no reply needed
+            uint16 streamId = (uint16)(Buffer.data()[4] | (Buffer.data()[5] << 8));
+            uint16 frames   = (uint16)(Buffer.data()[6] | (Buffer.data()[7] << 8));
+            // a stream the module filter dropped is not ours: do not log its end
+            if ( GetPeerStreamState(streamId) != PEER_STREAM_DROPPED )
+            {
+                std::cout << "DPlus end stream from peer " << Callsign
+                          << " streamid " << std::hex << std::setfill('0') << std::setw(4) << streamId
+                          << std::dec << std::setfill(' ')
+                          << " frames " << frames
+                          << " flag " << (int)Buffer.data()[3]
+                          // the REF also reports on streams it received from us:
+                          // observed as flag 0, and carrying the stream id we sent
+                          << ((Buffer.data()[3] == 0 || IsEchoOfOutboundStream(streamId, Ip)) ? " (our stream)" : "")
+                          << std::endl;
+            }
         }
         else
         {
